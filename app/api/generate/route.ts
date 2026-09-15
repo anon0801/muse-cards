@@ -10,7 +10,7 @@ function referenceFile(value: string) {
   const match = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/.exec(value);
   if (!match) throw new Error("PNG, JPG 또는 WEBP 이미지를 업로드해 주세요.");
   const bytes = Buffer.from(match[2], "base64");
-  if (bytes.length > 10 * 1024 * 1024) throw new Error("이미지는 10MB 이하로 업로드해 주세요.");
+  if (bytes.length > 3 * 1024 * 1024) throw new Error("캐릭터 이미지는 3MB 이하로 업로드해 주세요.");
   return new File([bytes], `reference.${match[1].split("/")[1]}`, { type: match[1] });
 }
 
@@ -22,8 +22,10 @@ export async function POST(req: Request) {
     if (!url || !anon) return NextResponse.json({ error: "Supabase 연결이 아직 설정되지 않았습니다." }, { status: 503 });
     const token = req.headers.get("authorization")?.replace(/^Bearer /, "");
     if (!token) return NextResponse.json({ error: "로그인 후 생성할 수 있습니다." }, { status: 401 });
-    const { data: { user }, error: authError } = await createClient(url, anon).auth.getUser(token);
+    const storageClient = createClient(url, anon, { global: { headers: { Authorization: `Bearer ${token}` } } });
+    const { data: { user }, error: authError } = await storageClient.auth.getUser(token);
     if (authError || !user) return NextResponse.json({ error: "로그인이 만료되었습니다. 다시 로그인해 주세요." }, { status: 401 });
+    const userId = user.id;
     const input = await req.json();
     const action = String(input.action || "");
     const persona = String(input.persona || "").trim().slice(0, 1200);
@@ -32,6 +34,20 @@ export async function POST(req: Request) {
     const format: Format = input.format in sizes ? input.format : "portrait";
     if (!persona || !topic) return NextResponse.json({ error: "브랜드 페르소나와 주제를 입력해 주세요." }, { status: 400 });
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    async function storeImage(b64: string) {
+      const path = `${userId}/${crypto.randomUUID()}.png`;
+      const { error: uploadError } = await storageClient.storage.from("card-assets").upload(path, Buffer.from(b64, "base64"), { contentType: "image/png" });
+      if (uploadError) throw uploadError;
+      const { data, error: signError } = await storageClient.storage.from("card-assets").createSignedUrl(path, 60 * 60 * 24);
+      if (signError) throw signError;
+      return { image: data.signedUrl, imagePath: path };
+    }
+    async function sheetFile(path: string) {
+      if (!path.startsWith(`${userId}/`)) throw new Error("본인의 캐릭터 시트만 사용할 수 있습니다.");
+      const { data, error: downloadError } = await storageClient.storage.from("card-assets").download(path);
+      if (downloadError || !data) throw downloadError || new Error("캐릭터 시트를 읽지 못했습니다.");
+      return new File([await data.arrayBuffer()], "character-sheet.png", { type: "image/png" });
+    }
 
     if (action === "plan") {
       const plan = await openai.chat.completions.create({
@@ -52,20 +68,20 @@ export async function POST(req: Request) {
       const sheet = await openai.images.edit({ model: "gpt-image-2", image: referenceFile(input.referenceImage), size: "1024x1024", prompt: `Create a single clean CHARACTER REFERENCE SHEET from the uploaded person or character. Preserve their exact recognizable facial identity, hair, distinctive marks and body proportions. Establish ONE consistent outfit and ONE illustration medium fitting this brand: ${persona}. Show front full body, three-quarter full body, and facial close-up. Keep the same outfit in every view. Plain neutral studio background. No words, letters, numbers, labels, logos, or watermark.` });
       const b64 = sheet.data?.[0]?.b64_json;
       if (!b64) throw new Error("캐릭터 시트 이미지가 반환되지 않았습니다.");
-      return NextResponse.json({ image: `data:image/png;base64,${b64}` });
+      return NextResponse.json(await storeImage(b64));
     }
 
     if (action === "image") {
       const card = input.card;
       if (!card || typeof card.visual !== "string") return NextResponse.json({ error: "카드 장면이 없습니다." }, { status: 400 });
-      const hasCharacter = Boolean(input.characterSheet);
+      const hasCharacter = Boolean(input.characterSheetPath);
       const prompt = `Create ONE premium, text-free editorial card-news image. Topic: ${topic}. Brand persona: ${persona}. Scene: ${String(card.visual).slice(0, 1500)}. ${hasCharacter ? "The uploaded image is the MASTER CHARACTER SHEET. Include this exact same character, recognizable face, hair, outfit, colors, body proportions and illustration medium. Do not redesign or change their clothes. Treat the sheet as authoritative for identity and style." : "Maintain a coherent editorial art direction with the brand persona."} Compose for a ${format} social media slide. Keep useful negative space for a Korean headline and body that will be added separately in the browser. Absolutely no text, glyphs, letters, numbers, Korean, signage, logos, or watermarks anywhere in the image.`;
       const image = hasCharacter
-        ? await openai.images.edit({ model: "gpt-image-2", image: referenceFile(input.characterSheet), size: sizes[format], prompt })
+        ? await openai.images.edit({ model: "gpt-image-2", image: await sheetFile(String(input.characterSheetPath)), size: sizes[format], prompt })
         : await openai.images.generate({ model: "gpt-image-2", size: sizes[format], output_format: "png", prompt });
       const b64 = image.data?.[0]?.b64_json;
       if (!b64) throw new Error("카드 이미지가 반환되지 않았습니다.");
-      return NextResponse.json({ image: `data:image/png;base64,${b64}` });
+      return NextResponse.json(await storeImage(b64));
     }
     return NextResponse.json({ error: "지원하지 않는 작업입니다." }, { status: 400 });
   } catch (error) {
