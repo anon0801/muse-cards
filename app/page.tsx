@@ -100,12 +100,12 @@ export default function Studio() {
       const plan = await api("plan");
       const planned = plan.cards as Card[];
       setCards(planned); setActive(0); setProjectId(""); setSheet(""); setSheetPath("");
-      let characterSheet = "";
-      if (useCharacter) { setProgress("같은 얼굴과 의상을 위한 캐릭터 시트를 만들고 있어요…"); characterSheet = (await api("sheet", { referenceImage: reference })).image; setSheet(characterSheet); }
+      let characterSheetPath = "";
+      if (useCharacter) { setProgress("같은 얼굴과 의상을 위한 캐릭터 시트를 만들고 있어요…"); const result = await api("sheet", { referenceImage: reference }); characterSheetPath = result.imagePath; setSheet(result.image); setSheetPath(characterSheetPath); }
       for (let index = 0; index < planned.length; index++) {
         setProgress(`${index + 1} / ${planned.length} 카드 이미지를 만들고 있어요…`);
-        const result = await api("image", { card: planned[index], characterSheet });
-        planned[index] = { ...planned[index], image: result.image };
+        const result = await api("image", { card: planned[index], characterSheetPath });
+        planned[index] = { ...planned[index], image: result.image, imagePath: result.imagePath };
         setCards([...planned]); setActive(index);
       }
       setProgress(""); setNotice("모든 카드가 완성됐습니다. 문구와 디자인을 수정하고 저장해 보세요.");
@@ -117,13 +117,8 @@ export default function Studio() {
     if (!card) return;
     setBusy(true); setError(""); setProgress("선택한 카드 이미지를 다시 만들고 있어요…");
     try {
-      let characterSheet = sheet;
-      if (useCharacter && sheetPath && sheet.startsWith("http")) {
-        const blob = await fetch(sheet).then(r => r.blob());
-        characterSheet = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = reject; reader.readAsDataURL(blob); });
-      }
-      const result = await api("image", { card, characterSheet: useCharacter ? characterSheet : "" });
-      setCards(cs => cs.map((c, i) => i === active ? { ...c, image: result.image, imagePath: undefined } : c));
+      const result = await api("image", { card, characterSheetPath: useCharacter ? sheetPath : "" });
+      setCards(cs => cs.map((c, i) => i === active ? { ...c, image: result.image, imagePath: result.imagePath } : c));
     } catch (e) { setError(e instanceof Error ? e.message : "이미지를 다시 만들지 못했습니다."); }
     finally { setBusy(false); setProgress(""); }
   }
@@ -158,7 +153,7 @@ export default function Studio() {
 
   function onUpload(file?: File) {
     if (!file) return;
-    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type) || file.size > 10 * 1024 * 1024) { setError("10MB 이하의 PNG, JPG 또는 WEBP 이미지를 선택해 주세요."); return; }
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type) || file.size > 3 * 1024 * 1024) { setError("3MB 이하의 PNG, JPG 또는 WEBP 이미지를 선택해 주세요."); return; }
     const reader = new FileReader(); reader.onload = () => { setReference(String(reader.result)); setError(""); }; reader.readAsDataURL(file);
   }
 
@@ -182,7 +177,7 @@ export default function Studio() {
       <div className="form"><label>브랜드 페르소나<textarea value={persona} onChange={e => setPersona(e.target.value)} rows={2} maxLength={1200} /></label><label>카드뉴스 주제<textarea placeholder="예: 바쁜 직장인을 위한 아침 루틴 5가지" value={topic} onChange={e => setTopic(e.target.value)} rows={3} maxLength={500} /></label>
         <div className="fieldrow"><label>카드 수<div className="stepper"><button aria-label="카드 수 줄이기" onClick={() => setCount(Math.max(2, count - 1))}>−</button><b>{count}장</b><button aria-label="카드 수 늘리기" onClick={() => setCount(Math.min(10, count + 1))}>+</button></div></label><label>이미지 크기<div className="segmented">{formats.map(f => <button key={f.id} className={format === f.id ? "selected" : ""} onClick={() => setFormat(f.id)}>{f.name}</button>)}</div><small className="dimension">완성 PNG: {selectedFormat.width} × {selectedFormat.height}px</small></label></div>
         <div className="character"><div><b>나의 사진·캐릭터 사용</b><span>먼저 캐릭터 시트를 만들고 모든 카드의 참조로 사용합니다.</span></div><button aria-label="나의 캐릭터 사용" aria-pressed={useCharacter} className={useCharacter ? "toggle on" : "toggle"} onClick={() => setUseCharacter(!useCharacter)}><i /></button></div>
-        {useCharacter && <label className="upload">{reference ? <img src={reference} alt="업로드한 캐릭터" /> : <ImagePlus size={24} />}<span>{reference ? "이미지 바꾸기" : "사진 또는 캐릭터 업로드"}<small>PNG, JPG, WEBP · 10MB 이하</small></span><input type="file" accept="image/png,image/jpeg,image/webp" onChange={e => onUpload(e.target.files?.[0])} /></label>}
+        {useCharacter && <label className="upload">{reference ? <img src={reference} alt="업로드한 캐릭터" /> : <ImagePlus size={24} />}<span>{reference ? "이미지 바꾸기" : "사진 또는 캐릭터 업로드"}<small>PNG, JPG, WEBP · 3MB 이하</small></span><input type="file" accept="image/png,image/jpeg,image/webp" onChange={e => onUpload(e.target.files?.[0])} /></label>}
         {error && <p className="error" role="alert">{error}</p>}{notice && <p className="notice" role="status">{notice}</p>}{progress && <p className="progress" role="status"><LoaderCircle className="spin" size={15} /> {progress}</p>}
         <button className="generate" onClick={generate} disabled={busy}>{busy ? <LoaderCircle className="spin" /> : <Sparkles />}{busy ? "제작 중…" : "카드뉴스 만들기"}</button>{cards.length > 0 && <button className="saveButton" onClick={save} disabled={busy}><Save size={16} /> 수정한 카드뉴스 저장</button>}</div>
       {sheet && <div className="sheet"><img src={sheet} alt="생성된 캐릭터 시트" /><span>모든 카드 이미지의 기준이 되는 캐릭터 시트</span></div>}
